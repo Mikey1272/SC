@@ -19,7 +19,8 @@ import {
   CheckCircle,
   Eye,
   Calendar,
-  ExternalLink
+  ExternalLink,
+  RefreshCw
 } from 'lucide-react';
 
 interface DashboardStats {
@@ -39,6 +40,7 @@ interface DashboardStats {
     totalUsers: number;
     onlineUsers: number;
   }>;
+  lastUpdated?: string;
 }
 
 interface Consultancy {
@@ -82,6 +84,7 @@ const AdminDashboard = () => {
   const [consultancies, setConsultancies] = useState<Consultancy[]>([]);
   const [selectedConsultancy, setSelectedConsultancy] = useState<ConsultancyDetails | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [showGenerateModal, setShowGenerateModal] = useState(false);
   const [showConsultancyModal, setShowConsultancyModal] = useState(false);
   const [consultancyName, setConsultancyName] = useState('');
@@ -94,16 +97,19 @@ const AdminDashboard = () => {
     fetchDashboardData();
     fetchConsultancies();
     
-    // Refresh data every 30 seconds
+    // Refresh data every 10 seconds for real-time updates
     const interval = setInterval(() => {
-      fetchDashboardData();
+      fetchDashboardData(true); // Silent refresh
       fetchConsultancies();
-    }, 30000);
+    }, 10000);
 
     return () => clearInterval(interval);
   }, []);
 
-  const fetchDashboardData = async () => {
+  const fetchDashboardData = async (silent = false) => {
+    if (!silent) setIsLoading(true);
+    if (silent) setIsRefreshing(true);
+    
     try {
       const token = localStorage.getItem('adminToken');
       const response = await fetch('http://localhost:3001/api/admin/stats', {
@@ -120,6 +126,7 @@ const AdminDashboard = () => {
       console.error('Failed to fetch dashboard stats:', error);
     } finally {
       setIsLoading(false);
+      setIsRefreshing(false);
     }
   };
 
@@ -223,6 +230,13 @@ const AdminDashboard = () => {
     });
   };
 
+  const formatTime = (dateString: string) => {
+    return new Date(dateString).toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+
   const getStatusColor = (isUsed: boolean, isExpired: boolean) => {
     if (isExpired) return 'bg-red-100 text-red-800';
     if (isUsed) return 'bg-green-100 text-green-800';
@@ -240,7 +254,7 @@ const AdminDashboard = () => {
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p className="text-gray-600">Loading dashboard...</p>
+          <p className="text-gray-600">Loading real-time dashboard...</p>
         </div>
       </div>
     );
@@ -264,9 +278,23 @@ const AdminDashboard = () => {
             
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-2 text-sm text-gray-600">
-                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                <span>Live Data</span>
+                <div className={`w-2 h-2 rounded-full ${isRefreshing ? 'bg-yellow-500 animate-pulse' : 'bg-green-500'}`}></div>
+                <span>
+                  {stats?.lastUpdated 
+                    ? `Updated ${formatTime(stats.lastUpdated)}`
+                    : 'Live Data'
+                  }
+                </span>
               </div>
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => fetchDashboardData()}
+                disabled={isRefreshing}
+                className="p-2 text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
+              >
+                <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+              </motion.button>
               <button
                 onClick={() => setShowGenerateModal(true)}
                 className="bg-gradient-to-r from-blue-500 to-indigo-600 text-white px-4 py-2 rounded-lg font-medium hover:shadow-lg transition-all duration-300 flex items-center gap-2"
@@ -288,28 +316,32 @@ const AdminDashboard = () => {
               value: stats?.totalUsers?.toLocaleString() || '0', 
               icon: <Users className="h-6 w-6" />, 
               color: 'blue',
-              change: '+12%'
+              change: '+12%',
+              realTime: true
             },
             { 
               title: 'Online Now', 
               value: stats?.onlineUsers?.toLocaleString() || '0', 
               icon: <Activity className="h-6 w-6" />, 
               color: 'green',
-              change: '+5%'
+              change: '+5%',
+              realTime: true
             },
             { 
               title: 'Total Messages', 
               value: stats?.totalMessages?.toLocaleString() || '0', 
               icon: <MessageSquare className="h-6 w-6" />, 
               color: 'purple',
-              change: '+28%'
+              change: '+28%',
+              realTime: true
             },
             { 
               title: 'Consultancies', 
               value: stats?.totalConsultancies?.toString() || '0', 
               icon: <Globe className="h-6 w-6" />, 
               color: 'indigo',
-              change: '+3%'
+              change: '+3%',
+              realTime: false
             }
           ].map((stat, index) => (
             <motion.div
@@ -323,9 +355,14 @@ const AdminDashboard = () => {
                 <div className={`p-2 rounded-lg bg-${stat.color}-100 text-${stat.color}-600`}>
                   {stat.icon}
                 </div>
-                <span className="text-xs text-green-600 bg-green-50 px-2 py-1 rounded-full">
-                  {stat.change}
-                </span>
+                <div className="flex items-center gap-2">
+                  {stat.realTime && (
+                    <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                  )}
+                  <span className="text-xs text-green-600 bg-green-50 px-2 py-1 rounded-full">
+                    {stat.change}
+                  </span>
+                </div>
               </div>
               <div className="text-2xl font-bold text-gray-900 mb-1">{stat.value}</div>
               <div className="text-sm text-gray-600">{stat.title}</div>
@@ -336,7 +373,10 @@ const AdminDashboard = () => {
         {/* Referral Codes Stats */}
         <div className="grid lg:grid-cols-3 gap-6 mb-8">
           <div className="bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Referral Code Statistics</h3>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-gray-900">Referral Code Statistics</h3>
+              <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+            </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="text-center p-4 bg-blue-50 rounded-lg">
                 <div className="text-2xl font-bold text-blue-600">{stats?.totalReferralCodes || 0}</div>
@@ -360,7 +400,13 @@ const AdminDashboard = () => {
           </div>
 
           <div className="lg:col-span-2 bg-white rounded-xl p-6 border border-gray-200 shadow-sm">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Country Statistics</h3>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-gray-900">Country Statistics</h3>
+              <div className="flex items-center gap-2 text-sm text-gray-600">
+                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                <span>Real-time</span>
+              </div>
+            </div>
             <div className="space-y-4">
               {stats?.countryStats?.map((country, index) => (
                 <motion.div 
@@ -375,7 +421,12 @@ const AdminDashboard = () => {
                     <div>
                       <span className="font-medium text-gray-900">{country.country}</span>
                       <div className="text-sm text-gray-600">
-                        {country.onlineUsers} online • {country.totalUsers} total users
+                        <span className="inline-flex items-center gap-1">
+                          <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                          {country.onlineUsers} online
+                        </span>
+                        <span className="mx-2">•</span>
+                        <span>{country.totalUsers} total users</span>
                       </div>
                     </div>
                   </div>
@@ -392,8 +443,16 @@ const AdminDashboard = () => {
         {/* Consultancies Table */}
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
           <div className="p-6 border-b border-gray-200">
-            <h2 className="text-lg font-semibold text-gray-900">Consultancies Management</h2>
-            <p className="text-sm text-gray-600 mt-1">Click on a consultancy to view detailed referral codes</p>
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Consultancies Management</h2>
+                <p className="text-sm text-gray-600 mt-1">Click on a consultancy to view detailed referral codes</p>
+              </div>
+              <div className="flex items-center gap-2 text-sm text-gray-600">
+                <Clock className="h-4 w-4" />
+                <span>Last updated: {stats?.lastUpdated ? formatTime(stats.lastUpdated) : 'Now'}</span>
+              </div>
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full">

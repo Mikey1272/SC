@@ -85,9 +85,27 @@ const AccessType = () => {
     e.preventDefault();
     setIsLoading(true);
     setError('');
+
+    if (formData.password !== formData.confirmPassword) {
+      setError('Passwords do not match');
+      setIsLoading(false);
+      return;
+    }
     
     try {
+      // First authenticate with Firebase
+      let userCredential;
+      
+      if (authMode === 'login') {
+        userCredential = await signInWithEmailAndPassword(auth, formData.email, formData.password);
+      } else {
+        userCredential = await createUserWithEmailAndPassword(auth, formData.email, formData.password);
+      }
+
+      const user = userCredential.user;
       const deviceId = getDeviceId();
+
+      // Then register with backend using referral code
       const response = await fetch('http://localhost:3001/api/auth/register-referral', {
         method: 'POST',
         headers: {
@@ -95,9 +113,11 @@ const AccessType = () => {
         },
         body: JSON.stringify({
           username: formData.username,
+          email: user.email,
           referralCode: formData.referralCode,
           country,
-          deviceId
+          deviceId,
+          firebaseUid: user.uid
         }),
       });
 
@@ -114,8 +134,8 @@ const AccessType = () => {
       } else {
         setError(data.error || 'Registration failed');
       }
-    } catch (err) {
-      setError('Network error. Please try again.');
+    } catch (err: any) {
+      setError(err.message || 'Authentication failed');
     } finally {
       setIsLoading(false);
     }
@@ -405,7 +425,7 @@ const AccessType = () => {
                   <Key className="h-6 w-6" />
                 </div>
                 <div className="text-left">
-                  <span className="font-semibold text-lg">Referral Code</span>
+                  <span className="font-semibold text-lg">Referral Code Access</span>
                   <p className="text-sm text-blue-100">From your consultancy partner</p>
                 </div>
               </div>
@@ -440,44 +460,124 @@ const AccessType = () => {
             </motion.button>
           </div>
         ) : accessType === 'referral' ? (
-          <form onSubmit={handleReferralSubmit} className="space-y-6">
-            <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-2">Username</label>
-              <input
-                type="text"
-                value={formData.username}
-                onChange={(e) => setFormData(prev => ({ ...prev, username: e.target.value }))}
-                required
-                className="block w-full px-4 py-3 border border-gray-300 rounded-xl bg-gray-50 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
-                placeholder="Enter your username"
-              />
+          <div className="space-y-6">
+            {/* Mode Toggle */}
+            <div className="flex bg-gray-100 rounded-lg p-1">
+              <button
+                onClick={() => setAuthMode('signup')}
+                className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-all ${
+                  authMode === 'signup'
+                    ? 'bg-white text-blue-600 shadow-sm'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Sign Up
+              </button>
+              <button
+                onClick={() => setAuthMode('login')}
+                className={`flex-1 py-2 px-4 rounded-md text-sm font-medium transition-all ${
+                  authMode === 'login'
+                    ? 'bg-white text-blue-600 shadow-sm'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Sign In
+              </button>
             </div>
 
-            <div>
-              <label className="block text-sm font-semibold text-gray-700 mb-2">Referral Code</label>
-              <input
-                type="text"
-                value={formData.referralCode}
-                onChange={(e) => handleReferralCodeChange(e.target.value)}
-                required
-                className="block w-full px-4 py-3 border border-gray-300 rounded-xl bg-gray-50 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
-                placeholder="Enter your referral code"
-              />
-            </div>
-            
-            <motion.button
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
-              type="submit"
-              disabled={isLoading || !consultancyName}
-              className="w-full font-semibold py-3 px-4 rounded-xl hover:shadow-lg transition-all duration-300 flex items-center justify-center bg-gradient-to-r from-blue-500 to-indigo-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isLoading ? (
-                <Loader className="h-5 w-5 animate-spin" />
-              ) : (
-                'Join with Referral Code'
+            <form onSubmit={handleReferralSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">Username</label>
+                <input
+                  type="text"
+                  value={formData.username}
+                  onChange={(e) => setFormData(prev => ({ ...prev, username: e.target.value }))}
+                  required
+                  className="block w-full px-4 py-3 border border-gray-300 rounded-xl bg-gray-50 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                  placeholder="Enter your username"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">Email</label>
+                <input
+                  type="email"
+                  value={formData.email}
+                  onChange={(e) => setFormData(prev => ({ ...prev, email: e.target.value }))}
+                  required
+                  className="block w-full px-4 py-3 border border-gray-300 rounded-xl bg-gray-50 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                  placeholder="Enter your email"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">Password</label>
+                <div className="relative">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    value={formData.password}
+                    onChange={(e) => setFormData(prev => ({ ...prev, password: e.target.value }))}
+                    required
+                    className="block w-full px-4 py-3 pr-10 border border-gray-300 rounded-xl bg-gray-50 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                    placeholder="Enter your password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center"
+                  >
+                    {showPassword ? (
+                      <EyeOff className="h-5 w-5 text-gray-400" />
+                    ) : (
+                      <Eye className="h-5 w-5 text-gray-400" />
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {authMode === 'signup' && (
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Confirm Password</label>
+                  <input
+                    type="password"
+                    value={formData.confirmPassword}
+                    onChange={(e) => setFormData(prev => ({ ...prev, confirmPassword: e.target.value }))}
+                    required
+                    className="block w-full px-4 py-3 border border-gray-300 rounded-xl bg-gray-50 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                    placeholder="Confirm your password"
+                  />
+                </div>
               )}
-            </motion.button>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Referral Code <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={formData.referralCode}
+                  onChange={(e) => handleReferralCodeChange(e.target.value)}
+                  required
+                  className="block w-full px-4 py-3 border border-gray-300 rounded-xl bg-gray-50 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                  placeholder="Enter your referral code (required)"
+                />
+                <p className="text-xs text-gray-500 mt-1">Referral code is mandatory for account creation</p>
+              </div>
+              
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                type="submit"
+                disabled={isLoading || !consultancyName}
+                className="w-full font-semibold py-3 px-4 rounded-xl hover:shadow-lg transition-all duration-300 flex items-center justify-center bg-gradient-to-r from-blue-500 to-indigo-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isLoading ? (
+                  <Loader className="h-5 w-5 animate-spin" />
+                ) : (
+                  authMode === 'login' ? 'Sign In with Referral' : 'Create Account with Referral'
+                )}
+              </motion.button>
+            </form>
 
             <button
               type="button"
@@ -486,7 +586,7 @@ const AccessType = () => {
             >
               ← Back to options
             </button>
-          </form>
+          </div>
         ) : (
           <div className="space-y-6">
             {/* Mode Toggle */}
@@ -675,7 +775,7 @@ const AccessType = () => {
                 <div>
                   <p className="text-sm font-medium text-blue-900">Referral Code Access</p>
                   <p className="text-xs text-blue-700 mt-1">
-                    Get your unique code from your education consultancy. One code works on one device only.
+                    Get your unique code from your education consultancy. Requires Firebase authentication for security.
                   </p>
                 </div>
               </div>

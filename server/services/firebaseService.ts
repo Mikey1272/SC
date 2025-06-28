@@ -29,15 +29,184 @@ export { adminDb, adminAuth };
 
 // Firebase database structure helpers
 export const dbPaths = {
+  users: 'users', // Store users by username
   consultancies: 'consultancies',
   referralCodes: 'referralCodes',
   verifiedUsers: 'verifiedUsers',
   deviceSessions: 'deviceSessions',
-  chatRooms: 'chatRooms'
+  chatRooms: 'chatRooms',
+  stats: 'stats',
+  messages: 'messages'
+};
+
+// Save user data under username for real-time access
+export const saveUserToFirebase = async (username: string, userData: any): Promise<void> => {
+  if (!adminDb) return;
+  
+  try {
+    const userPath = `${dbPaths.users}/${username}`;
+    await adminDb.ref(userPath).set({
+      ...userData,
+      createdAt: Date.now(),
+      lastUpdated: Date.now()
+    });
+    console.log('User saved to Firebase under username:', username);
+  } catch (error) {
+    console.error('Error saving user to Firebase:', error);
+    throw error;
+  }
+};
+
+// Save message to user's chat history under username
+export const saveMessageToFirebase = async (username: string, message: any): Promise<void> => {
+  if (!adminDb) return;
+  
+  try {
+    const messagePath = `${dbPaths.users}/${username}/messages`;
+    const messageRef = adminDb.ref(messagePath).push();
+    await messageRef.set({
+      ...message,
+      timestamp: Date.now()
+    });
+
+    // Also save to global messages for analytics
+    const globalMessagePath = `${dbPaths.messages}/${message.country}`;
+    const globalMessageRef = adminDb.ref(globalMessagePath).push();
+    await globalMessageRef.set({
+      ...message,
+      username,
+      timestamp: Date.now()
+    });
+
+    console.log('Message saved to Firebase for user:', username);
+  } catch (error) {
+    console.error('Error saving message to Firebase:', error);
+    throw error;
+  }
+};
+
+// Update user activity for real-time tracking
+export const updateUserActivity = async (username: string, activityData: any): Promise<void> => {
+  if (!adminDb) return;
+  
+  try {
+    const userPath = `${dbPaths.users}/${username}`;
+    await adminDb.ref(userPath).update({
+      ...activityData,
+      lastUpdated: Date.now()
+    });
+    
+    // Update global stats
+    await updateGlobalStats();
+    
+    console.log('User activity updated for:', username);
+  } catch (error) {
+    console.error('Error updating user activity:', error);
+    throw error;
+  }
+};
+
+// Get real-time statistics
+export const getRealTimeStats = async (): Promise<any> => {
+  if (!adminDb) return null;
+  
+  try {
+    const statsRef = adminDb.ref(dbPaths.stats);
+    const snapshot = await statsRef.once('value');
+    
+    if (snapshot.exists()) {
+      return snapshot.val();
+    }
+    
+    // If no stats exist, calculate and save them
+    await updateGlobalStats();
+    const newSnapshot = await statsRef.once('value');
+    return newSnapshot.exists() ? newSnapshot.val() : null;
+  } catch (error) {
+    console.error('Error getting real-time stats:', error);
+    return null;
+  }
+};
+
+// Update global statistics
+export const updateGlobalStats = async (): Promise<void> => {
+  if (!adminDb) return;
+  
+  try {
+    // Get all users
+    const usersSnapshot = await adminDb.ref(dbPaths.users).once('value');
+    const users = usersSnapshot.val() || {};
+    
+    // Get all consultancies
+    const consultanciesSnapshot = await adminDb.ref(dbPaths.consultancies).once('value');
+    const consultancies = consultanciesSnapshot.val() || {};
+    
+    // Get all referral codes
+    const referralCodesSnapshot = await adminDb.ref(dbPaths.referralCodes).once('value');
+    const referralCodes = referralCodesSnapshot.val() || {};
+    
+    // Get all messages
+    const messagesSnapshot = await adminDb.ref(dbPaths.messages).once('value');
+    const messages = messagesSnapshot.val() || {};
+    
+    // Calculate stats
+    const userList = Object.values(users);
+    const totalUsers = userList.length;
+    const onlineUsers = userList.filter((user: any) => user.isOnline).length;
+    
+    const referralCodeList = Object.values(referralCodes);
+    const totalReferralCodes = referralCodeList.length;
+    const usedReferralCodes = referralCodeList.filter((code: any) => code.isUsed).length;
+    const expiredReferralCodes = referralCodeList.filter((code: any) => new Date() > new Date(code.expiresAt)).length;
+    
+    const totalConsultancies = Object.keys(consultancies).length;
+    
+    // Calculate total messages across all countries
+    let totalMessages = 0;
+    const countryStats = [];
+    
+    const countries = ['us', 'uk', 'de', 'ca', 'au'];
+    
+    for (const countryId of countries) {
+      const countryMessages = messages[countryId] || {};
+      const countryMessageCount = Object.keys(countryMessages).length;
+      totalMessages += countryMessageCount;
+      
+      const countryUsers = userList.filter((user: any) => user.assignedCountry === countryId);
+      const countryOnlineUsers = countryUsers.filter((user: any) => user.isOnline).length;
+      
+      countryStats.push({
+        countryId,
+        totalUsers: countryUsers.length,
+        onlineUsers: countryOnlineUsers,
+        activeUsers: countryOnlineUsers, // For compatibility
+        totalMessages: countryMessageCount
+      });
+    }
+    
+    const stats = {
+      totalUsers,
+      onlineUsers,
+      totalMessages,
+      totalConsultancies,
+      totalReferralCodes,
+      usedReferralCodes,
+      expiredReferralCodes,
+      pendingReports: 0, // TODO: Implement reports tracking
+      countryStats,
+      lastUpdated: Date.now()
+    };
+    
+    await adminDb.ref(dbPaths.stats).set(stats);
+    console.log('Global stats updated');
+  } catch (error) {
+    console.error('Error updating global stats:', error);
+    throw error;
+  }
 };
 
 // Save user data under consultancy structure for referral users
-export const saveUserToConsultancy = async (consultancyName: string, referralCode: string, userData: any) => {
+export const saveUserToConsultancy = async (consultancyName: string, referralCode: string, userData: any): Promise<void> => {
   if (!adminDb) return;
   
   try {
@@ -73,7 +242,7 @@ export const getUserFromConsultancy = async (consultancyName: string, referralCo
 };
 
 // Save message to user's chat history under consultancy
-export const saveMessageToUser = async (consultancyName: string, referralCode: string, message: any) => {
+export const saveMessageToUser = async (consultancyName: string, referralCode: string, message: any): Promise<void> => {
   if (!adminDb) return;
   
   try {
@@ -111,7 +280,7 @@ export const getUserChatHistory = async (consultancyName: string, referralCode: 
 };
 
 // Save verified user (non-referral users)
-export const saveVerifiedUser = async (userId: string, userData: any) => {
+export const saveVerifiedUser = async (userId: string, userData: any): Promise<void> => {
   if (!adminDb) return;
   
   try {
@@ -147,7 +316,7 @@ export const getVerifiedUser = async (userId: string) => {
 };
 
 // Save consultancy data
-export const saveConsultancy = async (consultancyId: string, consultancyData: any) => {
+export const saveConsultancy = async (consultancyId: string, consultancyData: any): Promise<void> => {
   if (!adminDb) return;
   
   try {
@@ -165,7 +334,7 @@ export const saveConsultancy = async (consultancyId: string, consultancyData: an
 };
 
 // Save referral codes
-export const saveReferralCodes = async (codes: any[]) => {
+export const saveReferralCodes = async (codes: any[]): Promise<void> => {
   if (!adminDb) return;
   
   try {
@@ -182,7 +351,7 @@ export const saveReferralCodes = async (codes: any[]) => {
   }
 };
 
-export const createUserSession = async (userId: string, deviceId: string, referralCode?: string) => {
+export const createDeviceSession = async (userId: string, deviceId: string, referralCode?: string): Promise<void> => {
   if (!adminDb) return;
   
   const sessionData = {

@@ -20,8 +20,13 @@ import {
   saveVerifiedUser,
   getVerifiedUser,
   saveConsultancy,
-  saveReferralCodes
+  saveReferralCodes,
+  updateUserActivity,
+  getRealTimeStats,
+  saveUserToFirebase,
+  saveMessageToFirebase
 } from './services/firebaseService.js';
+import { moderateMessage, generateViolationWarning } from './utils/contentModeration.js';
 
 const app = express();
 const server = createServer(app);
@@ -90,55 +95,6 @@ countries.forEach(country => {
     activeUsers: Math.floor(Math.random() * 100) + 50
   });
 });
-
-// Content moderation function
-const moderateMessage = (message: string): { isClean: boolean; cleanMessage: string; violations: string[] } => {
-  const violations: string[] = [];
-  let cleanMessage = message;
-
-  // Enhanced profanity and contact sharing filter
-  const badWords = ['spam', 'scam', 'fake', 'fraud', 'shit', 'fuck', 'damn', 'bitch'];
-  const phoneRegex = /(\+?\d{1,4}[-.\s]?)?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9}/g;
-  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-  const socialRegex = /@[a-zA-Z0-9._]+|whatsapp|telegram|instagram|facebook|snapchat|discord/gi;
-  const contactRegex = /contact\s+me|dm\s+me|message\s+me|call\s+me|text\s+me/gi;
-
-  // Check for bad words
-  const lowerMessage = message.toLowerCase();
-  for (const word of badWords) {
-    if (lowerMessage.includes(word)) {
-      violations.push('inappropriate_language');
-      cleanMessage = cleanMessage.replace(new RegExp(word, 'gi'), '***');
-    }
-  }
-
-  // Check for contact sharing
-  if (phoneRegex.test(message)) {
-    violations.push('phone_sharing');
-    cleanMessage = cleanMessage.replace(phoneRegex, '[CONTACT REMOVED]');
-  }
-
-  if (emailRegex.test(message)) {
-    violations.push('email_sharing');
-    cleanMessage = cleanMessage.replace(emailRegex, '[EMAIL REMOVED]');
-  }
-
-  if (socialRegex.test(message)) {
-    violations.push('social_sharing');
-    cleanMessage = cleanMessage.replace(socialRegex, '[SOCIAL REMOVED]');
-  }
-
-  if (contactRegex.test(message)) {
-    violations.push('contact_request');
-    cleanMessage = cleanMessage.replace(contactRegex, '[CONTACT REQUEST REMOVED]');
-  }
-
-  return {
-    isClean: violations.length === 0,
-    cleanMessage,
-    violations
-  };
-};
 
 // Authentication middleware
 const authenticateToken = (req: any, res: any, next: any) => {
@@ -287,11 +243,11 @@ app.post('/api/auth/validate-referral', async (req, res) => {
   });
 });
 
-// Register with referral code
+// Register with referral code (now with Firebase auth)
 app.post('/api/auth/register-referral', async (req, res) => {
-  const { username, referralCode, country, deviceId } = req.body;
+  const { username, email, referralCode, country, deviceId, firebaseUid } = req.body;
 
-  if (!username || !referralCode || !country || !deviceId) {
+  if (!username || !email || !referralCode || !country || !deviceId) {
     return res.status(400).json({ error: 'All fields are required' });
   }
 
@@ -317,10 +273,11 @@ app.post('/api/auth/register-referral', async (req, res) => {
     }
   }
 
-  const userId = existingUser?.id || referralCode; // Use referral code as user ID
+  const userId = firebaseUid || existingUser?.id || referralCode; // Use Firebase UID as primary ID
   const user: User = existingUser || {
     id: userId,
     username,
+    email,
     country,
     assignedCountry: country, // Lock to selected country
     isOnline: false,
@@ -332,17 +289,21 @@ app.post('/api/auth/register-referral', async (req, res) => {
     deviceId,
     reportCount: 0,
     isBanned: false,
-    joinedAt: new Date()
+    joinedAt: new Date(),
+    firebaseUid
   };
 
   user.deviceId = deviceId;
+  user.email = email;
+  user.firebaseUid = firebaseUid;
   users.set(userId, user);
 
-  // Save user data to Firebase under consultancy structure
+  // Save user data to Firebase under username
   try {
-    await saveUserToConsultancy(code.consultancyName, referralCode, {
+    await saveUserToFirebase(username, {
       id: userId,
       username,
+      email,
       country,
       assignedCountry: country,
       avatar: user.avatar,
@@ -353,9 +314,30 @@ app.post('/api/auth/register-referral', async (req, res) => {
       reportCount: 0,
       isBanned: false,
       joinedAt: user.joinedAt.toISOString(),
-      lastSeen: user.lastSeen.toISOString()
+      lastSeen: user.lastSeen.toISOString(),
+      firebaseUid
     });
-    console.log('User saved to Firebase under consultancy:', code.consultancyName);
+
+    // Also save to consultancy structure for admin tracking
+    await saveUserToConsultancy(code.consultancyName, referralCode, {
+      id: userId,
+      username,
+      email,
+      country,
+      assignedCountry: country,
+      avatar: user.avatar,
+      accountType: 'referral',
+      referralCode,
+      consultancyName: code.consultancyName,
+      deviceId,
+      reportCount: 0,
+      isBanned: false,
+      joinedAt: user.joinedAt.toISOString(),
+      lastSeen: user.lastSeen.toISOString(),
+      firebaseUid
+    });
+
+    console.log('User saved to Firebase under username:', username);
   } catch (error) {
     console.error('Error saving user to Firebase:', error);
   }
@@ -386,6 +368,7 @@ app.post('/api/auth/register-referral', async (req, res) => {
     user: {
       id: user.id,
       username: user.username,
+      email: user.email,
       country: user.country,
       assignedCountry: user.assignedCountry,
       accountType: user.accountType,
@@ -434,6 +417,7 @@ app.post('/api/auth/switch-device', async (req, res) => {
     user: {
       id: user.id,
       username: user.username,
+      email: user.email,
       country: user.country,
       assignedCountry: user.assignedCountry,
       accountType: user.accountType,
@@ -496,8 +480,24 @@ app.post('/api/auth/register-email', async (req, res) => {
 
   users.set(userId, user);
 
-  // Save to Firebase
+  // Save to Firebase under username
   try {
+    await saveUserToFirebase(username, {
+      id: userId,
+      username,
+      email,
+      avatar: user.avatar,
+      accountType: 'verified',
+      deviceId,
+      reportCount: 0,
+      isBanned: false,
+      joinedAt: user.joinedAt.toISOString(),
+      lastSeen: user.lastSeen.toISOString(),
+      visaVerified: false,
+      firebaseUid
+    });
+
+    // Also save to verified users collection
     await saveVerifiedUser(userId, {
       id: userId,
       username,
@@ -512,6 +512,7 @@ app.post('/api/auth/register-email', async (req, res) => {
       visaVerified: false,
       firebaseUid
     });
+
     console.log('Verified user saved to Firebase:', userId);
   } catch (error) {
     console.error('Error saving verified user to Firebase:', error);
@@ -594,6 +595,15 @@ app.post('/api/auth/upload-visa', authenticateToken, async (req, res) => {
 
   // Update in Firebase
   try {
+    await saveUserToFirebase(user.username, {
+      ...user,
+      visaPhotoUrl,
+      country,
+      assignedCountry: country,
+      visaVerified: true,
+      lastUpdated: Date.now()
+    });
+
     await saveVerifiedUser(userId, {
       ...user,
       visaPhotoUrl,
@@ -602,6 +612,7 @@ app.post('/api/auth/upload-visa', authenticateToken, async (req, res) => {
       visaVerified: true,
       lastUpdated: Date.now()
     });
+
     console.log('User visa verification updated in Firebase:', userId);
   } catch (error) {
     console.error('Error updating user visa in Firebase:', error);
@@ -650,41 +661,88 @@ app.post('/api/auth/admin-login', (req, res) => {
   });
 });
 
-// Get dashboard stats (live data)
-app.get('/api/admin/stats', authenticateToken, (req, res) => {
-  const totalUsers = users.size;
-  const onlineUsers = Array.from(users.values()).filter(u => u.isOnline).length;
-  const totalMessages = Array.from(rooms.values()).reduce((sum, room) => sum + room.messages.length, 0);
-  const totalConsultancies = consultancies.size;
-  const totalReferralCodes = referralCodes.size;
-  const usedReferralCodes = Array.from(referralCodes.values()).filter(c => c.isUsed).length;
-  const expiredReferralCodes = Array.from(referralCodes.values()).filter(c => new Date() > c.expiresAt).length;
-  const pendingReports = Array.from(reports.values()).filter(r => r.status === 'pending').length;
+// Get dashboard stats (real-time data)
+app.get('/api/admin/stats', authenticateToken, async (req, res) => {
+  try {
+    // Get real-time stats from Firebase
+    const realTimeStats = await getRealTimeStats();
+    
+    // Fallback to in-memory data if Firebase is unavailable
+    const totalUsers = realTimeStats?.totalUsers || users.size;
+    const onlineUsers = realTimeStats?.onlineUsers || Array.from(users.values()).filter(u => u.isOnline).length;
+    const totalMessages = realTimeStats?.totalMessages || Array.from(rooms.values()).reduce((sum, room) => sum + room.messages.length, 0);
+    const totalConsultancies = realTimeStats?.totalConsultancies || consultancies.size;
+    const totalReferralCodes = realTimeStats?.totalReferralCodes || referralCodes.size;
+    const usedReferralCodes = realTimeStats?.usedReferralCodes || Array.from(referralCodes.values()).filter(c => c.isUsed).length;
+    const expiredReferralCodes = realTimeStats?.expiredReferralCodes || Array.from(referralCodes.values()).filter(c => new Date() > c.expiresAt).length;
+    const pendingReports = realTimeStats?.pendingReports || Array.from(reports.values()).filter(r => r.status === 'pending').length;
 
-  const countryStats = countries.map(country => {
-    const room = rooms.get(country.id);
-    const countryUsers = Array.from(users.values()).filter(u => u.assignedCountry === country.id);
-    return {
-      country: country.name,
-      flag: country.flag,
-      activeUsers: room?.activeUsers || 0,
-      totalMessages: room?.messages.length || 0,
-      totalUsers: countryUsers.length,
-      onlineUsers: countryUsers.filter(u => u.isOnline).length
-    };
-  });
+    const countryStats = countries.map(country => {
+      const room = rooms.get(country.id);
+      const countryUsers = Array.from(users.values()).filter(u => u.assignedCountry === country.id);
+      const realTimeCountryData = realTimeStats?.countryStats?.find(c => c.countryId === country.id);
+      
+      return {
+        country: country.name,
+        flag: country.flag,
+        activeUsers: realTimeCountryData?.activeUsers || room?.activeUsers || 0,
+        totalMessages: realTimeCountryData?.totalMessages || room?.messages.length || 0,
+        totalUsers: realTimeCountryData?.totalUsers || countryUsers.length,
+        onlineUsers: realTimeCountryData?.onlineUsers || countryUsers.filter(u => u.isOnline).length
+      };
+    });
 
-  res.json({
-    totalUsers,
-    onlineUsers,
-    totalMessages,
-    totalConsultancies,
-    totalReferralCodes,
-    usedReferralCodes,
-    expiredReferralCodes,
-    pendingReports,
-    countryStats
-  });
+    res.json({
+      totalUsers,
+      onlineUsers,
+      totalMessages,
+      totalConsultancies,
+      totalReferralCodes,
+      usedReferralCodes,
+      expiredReferralCodes,
+      pendingReports,
+      countryStats,
+      lastUpdated: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error fetching real-time stats:', error);
+    
+    // Fallback to in-memory data
+    const totalUsers = users.size;
+    const onlineUsers = Array.from(users.values()).filter(u => u.isOnline).length;
+    const totalMessages = Array.from(rooms.values()).reduce((sum, room) => sum + room.messages.length, 0);
+    const totalConsultancies = consultancies.size;
+    const totalReferralCodes = referralCodes.size;
+    const usedReferralCodes = Array.from(referralCodes.values()).filter(c => c.isUsed).length;
+    const expiredReferralCodes = Array.from(referralCodes.values()).filter(c => new Date() > c.expiresAt).length;
+    const pendingReports = Array.from(reports.values()).filter(r => r.status === 'pending').length;
+
+    const countryStats = countries.map(country => {
+      const room = rooms.get(country.id);
+      const countryUsers = Array.from(users.values()).filter(u => u.assignedCountry === country.id);
+      return {
+        country: country.name,
+        flag: country.flag,
+        activeUsers: room?.activeUsers || 0,
+        totalMessages: room?.messages.length || 0,
+        totalUsers: countryUsers.length,
+        onlineUsers: countryUsers.filter(u => u.isOnline).length
+      };
+    });
+
+    res.json({
+      totalUsers,
+      onlineUsers,
+      totalMessages,
+      totalConsultancies,
+      totalReferralCodes,
+      usedReferralCodes,
+      expiredReferralCodes,
+      pendingReports,
+      countryStats,
+      lastUpdated: new Date().toISOString()
+    });
+  }
 });
 
 // Get consultancies with enhanced details
@@ -753,7 +811,7 @@ app.post('/api/report-user', authenticateToken, (req, res) => {
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
-  socket.on('join-room', (data: { userId: string; username: string; country: string; token: string }) => {
+  socket.on('join-room', async (data: { userId: string; username: string; country: string; token: string }) => {
     const { userId, username, country, token } = data;
     
     // Verify token
@@ -784,6 +842,17 @@ io.on('connection', (socket) => {
     user.lastSeen = new Date();
     users.set(userId, user);
     userSockets.set(userId, socket.id);
+
+    // Update user activity in Firebase
+    try {
+      await updateUserActivity(username, {
+        isOnline: true,
+        lastSeen: new Date().toISOString(),
+        currentCountry: country
+      });
+    } catch (error) {
+      console.error('Error updating user activity in Firebase:', error);
+    }
     
     // Join room
     socket.join(country);
@@ -840,7 +909,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Moderate message
+    // Enhanced content moderation
     const moderation = moderateMessage(text);
     
     const message: Message = {
@@ -859,22 +928,35 @@ io.on('connection', (socket) => {
     
     room.messages.push(message);
 
-    // Save message to Firebase if user has referral code
-    if (user.referralCode && user.consultancyName) {
-      try {
+    // Save message to Firebase under user's username
+    try {
+      await saveMessageToFirebase(user.username, message);
+      
+      // Also save to consultancy structure if user has referral code
+      if (user.referralCode && user.consultancyName) {
         await saveMessageToUser(user.consultancyName, user.referralCode, message);
-        console.log('Message saved to Firebase for user:', user.referralCode);
-      } catch (error) {
-        console.error('Error saving message to Firebase:', error);
       }
+      
+      console.log('Message saved to Firebase for user:', user.username);
+    } catch (error) {
+      console.error('Error saving message to Firebase:', error);
     }
     
-    // Send moderation warning if needed
+    // Send enhanced moderation warning if needed
     if (!moderation.isClean) {
+      const warningMessage = generateViolationWarning(moderation.violations);
       socket.emit('moderation-warning', {
         violations: moderation.violations,
         originalMessage: text,
-        cleanMessage: moderation.cleanMessage
+        cleanMessage: moderation.cleanMessage,
+        warningMessage
+      });
+      
+      // Log moderation event
+      console.log(`Message moderated for user ${user.username}:`, {
+        original: text,
+        clean: moderation.cleanMessage,
+        violations: moderation.violations
       });
     }
     
@@ -916,7 +998,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     console.log('User disconnected:', socket.id);
     
     // Find and remove user
@@ -931,6 +1013,16 @@ io.on('connection', (socket) => {
           disconnectedUser.isOnline = false;
           disconnectedUser.lastSeen = new Date();
           users.set(userId, disconnectedUser);
+
+          // Update user activity in Firebase
+          try {
+            await updateUserActivity(disconnectedUser.username, {
+              isOnline: false,
+              lastSeen: new Date().toISOString()
+            });
+          } catch (error) {
+            console.error('Error updating user activity in Firebase:', error);
+          }
         }
         userSockets.delete(userId);
         break;
